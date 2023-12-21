@@ -5,41 +5,64 @@ import (
 	"fmt"
 	"log"
 
-	mapset "github.com/deckarep/golang-set/v2"
-	admissionv1 "k8s.io/api/admission/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"github.com/google/cel-go/cel"
+	"github.com/google/cel-go/common/types"
+	"github.com/google/cel-go/ext"
+	k8s "github.com/kubewarden/go-wasi-policy-template/cel/library"
 )
 
-func validate(input []byte) []byte {
+func validate(payload []byte) []byte {
 	var validationRequest ValidationRequest
 
-	err := json.Unmarshal(input, &validationRequest)
+	err := json.Unmarshal(payload, &validationRequest)
 	if err != nil {
 		return marshalValidationResponseOrFail(
 			RejectRequest(
 				Message(fmt.Sprintf("Error deserializing validation request: %v", err)),
 				Code(400)))
 	}
-	settingsJSON, err := validationRequest.SettingsRaw.MarshalJSON()
+
+	env, err := cel.NewEnv(
+		cel.EagerlyValidateDeclarations(true),
+		cel.DefaultUTCTimeZone(true),
+		ext.Strings(ext.StringsVersion(2)),
+		cel.CrossTypeNumericComparisons(true),
+		cel.OptionalTypes(),
+		k8s.URLs(),
+		k8s.Regex(),
+		k8s.Lists(),
+		cel.Variable("self", cel.DynType),
+		cel.Variable("oldSelf", cel.DynType),
+	)
 	if err != nil {
-		return marshalValidationResponseOrFail(
-			RejectRequest(
-				Message(fmt.Sprintf("Error serializing RawMessage: %v", err)),
-				Code(400)))
+		log.Fatalf("failed to create CEL env: %v", err)
 	}
-	settings := Settings{
-		// required to allow marshal
-		ForbiddenAnnotations: mapset.NewSet[string](),
+
+	ast, issues := env.Compile(validationRequest.Settings.Expression)
+	if issues != nil {
+		log.Fatalf("failed to compile the CEL expression: %s", issues.String())
 	}
-	if err := json.Unmarshal(settingsJSON, &settings); err != nil {
+
+	prog, err := env.Program(ast, cel.EvalOptions(cel.OptOptimize, cel.OptTrackCost))
+	if err != nil {
+		log.Fatalf("failed to instantiate CEL program: %v", err)
+	}
+	val, _, err := prog.Eval(map[string]interface{}{
+		"self":    validationRequest.Request.Object,
+		"oldSelf": validationRequest.Request.OldObject,
+	})
+	if err != nil {
+		log.Fatalf("failed to evaluate: %v", err)
+	}
+
+	if val == types.True {
 		return marshalValidationResponseOrFail(
-			RejectRequest(
-				Message(fmt.Sprintf("Error deserializing Settings: %v", err)),
-				Code(400)))
+			AcceptRequest())
 	}
 
 	return marshalValidationResponseOrFail(
-		validateAdmissionReview(settings, validationRequest.Request))
+		RejectRequest(Message(validationRequest.Settings.Message), 400),
+	)
 }
 
 func marshalValidationResponseOrFail(response ValidationResponse) []byte {
@@ -48,48 +71,4 @@ func marshalValidationResponseOrFail(response ValidationResponse) []byte {
 		log.Fatalf("cannot marshal validation response: %v", err)
 	}
 	return responseBytes
-}
-
-func validateAdmissionReview(policySettings Settings, request admissionv1.AdmissionRequest) ValidationResponse {
-	obj := unstructured.Unstructured{}
-	err := json.Unmarshal(request.Object.Raw, &obj)
-	if err != nil {
-		return RejectRequest(
-			Message(fmt.Sprintf("Error deserializing request object into unstructured: %v", err)),
-			Code(400))
-	}
-
-	annotations := obj.GetAnnotations()
-	if annotations == nil {
-		annotations = make(map[string]string)
-	}
-
-	// check if one of the annotations is forbidden
-	annotationsSet := mapset.NewSet[string]()
-	for key := range annotations {
-		annotationsSet.Add(key)
-	}
-	forbiddenAnnotations := annotationsSet.Intersect(policySettings.ForbiddenAnnotations)
-	if forbiddenAnnotations.Cardinality() > 0 {
-		return RejectRequest(
-			Message(fmt.Sprintf("The following annotations are forbidden: %s", forbiddenAnnotations.String())),
-			Code(400))
-	}
-
-	// eventually mutate the current annotations
-	annotationsChanged := false
-	for key, value := range policySettings.RequiredAnnotations {
-		currentValue, hasKey := annotations[key]
-		if !hasKey || currentValue != value {
-			annotations[key] = value
-			annotationsChanged = true
-		}
-	}
-
-	if annotationsChanged {
-		obj.SetAnnotations(annotations)
-		return MutateRequest(&obj)
-	}
-
-	return AcceptRequest()
 }

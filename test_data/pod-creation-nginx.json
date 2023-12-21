@@ -37,8 +37,6 @@
   "userInfo": {
     "username": "alice",
     "uid": "alice-uid",
-    "groups": [
-      "system:authenticated"
-    ]
+    "groups": ["system:authenticated"]
   }
 }
