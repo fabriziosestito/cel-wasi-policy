@@ -5,18 +5,16 @@ package main
 // We cannot add that to the Kubewarden Go SDK because it would not work
 // with TinyGo
 
-import (
-	"encoding/json"
-
-	admissionv1 "k8s.io/api/admission/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-)
-
 // ValidationRequest describes the input received by the policy
 // when invoked via the `validate` subcommand
 type ValidationRequest struct {
-	Request     admissionv1.AdmissionRequest `json:"request"`
-	SettingsRaw json.RawMessage              `json:"settings"`
+	Request  AdmissionRequest `json:"request"`
+	Settings Settings         `json:"settings"`
+}
+
+type AdmissionRequest struct {
+	Object    map[string]any `json:"object"`
+	OldObject map[string]any `json:"oldObject,omitempty"`
 }
 
 // Message is the optional string used to build validation responses
@@ -44,8 +42,6 @@ type ValidationResponse struct {
 	Message *string `json:"message,omitempty"`
 	// Optional - ignored if accepted
 	Code *uint16 `json:"code,omitempty"`
-	// Optional - used only by mutating policies
-	MutatedObject *unstructured.Unstructured `json:"mutated_object,omitempty"`
 }
 
 // SettingsValidationResponse is the response sent by a policy when validating
@@ -61,15 +57,6 @@ type SettingsValidationResponse struct {
 func AcceptRequest() ValidationResponse {
 	return ValidationResponse{
 		Accepted: true,
-	}
-}
-
-// MutateRequest accepts the request. The given `mutatedObject` is how
-// the evaluated object must look once accepted
-func MutateRequest(mutatedObject *unstructured.Unstructured) ValidationResponse {
-	return ValidationResponse{
-		Accepted:      true,
-		MutatedObject: mutatedObject,
 	}
 }
 

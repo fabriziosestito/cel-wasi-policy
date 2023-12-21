@@ -1,0 +1,4 @@
+{
+  "message": "Nginx name is not allowed",
+  "expression": "self.metadata.name != 'nginx'"
+}
